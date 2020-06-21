@@ -51,9 +51,106 @@ class Board(object):
     def move(self, from_position, to_position):
         """ (Board) Return the resultant board from moving the given position into the other """
         piece = self.get_piece(from_position)
+
+        # promote pawns to queens on 8th rank
+        if self.is_promoting(from_position, to_position):
+            piece = Queen(piece.get_side())
+
         intermediate = Board(board=self.set_position(to_position, piece))
         result = intermediate.set_position(from_position, None)
+
+        piece.set_moved(True)
         return Board(board=result)
+
+    def castle(self, side, long):
+        is_white = True if side == WHITE else False
+        rank = {True: 0, False: 7}
+        y = rank.get(is_white, 0)
+
+        king_position = (4, y)
+        rook_position = (rank[long], y)
+
+        king_delta = (-2, 0) if long else (2, 0)
+        rook_delta = (1, 0) if long else (-1, 0)
+        next_king_position = Board.add_position(king_position, king_delta)
+        next_rook_position = Board.add_position(next_king_position, rook_delta)
+
+        intermediate = self.move(king_position, next_king_position)
+        return intermediate.move(rook_position, next_rook_position)
+
+    def is_castling(self, from_position, to_position):
+        # Really stupid implementation
+        piece = self.get_piece(from_position)
+        if not isinstance(piece, King):
+            return False, None
+
+        dx, dy = Board.subtract_position(to_position, from_position)
+        if dx == 2:
+            return True, piece.get_side(), False
+        elif dx == -2:
+            return True, piece.get_side(), True
+
+        return False, None
+
+    def can_castle(self, side, long):
+        is_white = True if side == WHITE else False
+        rank = {True: 0, False: 7}
+        y = rank.get(is_white, 0)
+
+        king_position = (4, y)
+        rook_position = (rank[long], y)
+
+        king = self.get_piece(king_position)
+        if not isinstance(king, King) or king.has_moved():
+            return False
+
+        rook = self.get_piece(rook_position)
+        if not isinstance(rook, Rook) or rook.has_moved():
+            return False
+
+        # check king in check
+        side = WHITE if is_white else BLACK
+        if self.is_in_check(side):
+            return False
+        
+        # get squares between them
+        if long:
+            xs = list(range(1, 4))
+        else:
+            xs = list(range(5, 7))
+        squares = [(x, y) for x in xs]
+
+        # check nothing between them
+        for square in squares:
+            if self.get_piece(square) is not None:
+                return False
+
+        # check no move of king would be in check
+        for square in squares:
+            
+            # move king there
+            if square[0] == 1: # ignore this square
+                continue
+
+            intermediate = self.move(king_position, square)
+            king.set_moved(False)
+            # check if in check
+            if intermediate.is_in_check(side):
+                return False
+
+        return True
+    
+    def is_promoting(self, from_position, to_position):
+        piece = self.get_piece(from_position)
+        if piece is None or not isinstance(piece, Pawn):
+            return False
+
+        side = piece.get_side()
+        return to_position[1] == 7 - side * 7
+
+    
+        
+
 
     def is_in_check(self, side):
         king_position = None
@@ -104,6 +201,12 @@ class Board(object):
         dx, dy = delta
         return x + dx, y + dy
 
+    @staticmethod
+    def subtract_position(position, other):
+        x, y = position
+        dx, dy = other
+        return x - dx, y - dy
+
     def display(self):
         result = []
         for row in range(GRID_SIZE):
@@ -120,9 +223,16 @@ class Piece(object):
         self._deltas = move_deltas
         self._side = side
         self._jumps = jumps
+        self._has_moved = False
 
     def get_deltas(self, position):
         return self._deltas
+
+    def has_moved(self):
+        return self._has_moved
+
+    def set_moved(self, moved):
+        self._has_moved = moved
 
     def get_side(self):
         return self._side
@@ -137,7 +247,7 @@ class Piece(object):
                 if not Board.is_valid_position(next_position):
                     continue
                 piece = board.get_piece(next_position)
-                if piece is None or piece.get_side != self._side:
+                if piece is None or piece.get_side() != self._side:
                     result.append(next_position)
 
             else:
@@ -172,8 +282,11 @@ class Piece(object):
     def load(x):
         CLASS_MAP = {
             'K': King,
-            'k': Knight,
+            'N': Knight,
             'p': Pawn,
+            'R': Rook,
+            'Q': Queen,
+            'B': Bishop,
         }
         try:
             identifier, side = x.split(':')
@@ -215,6 +328,9 @@ class ChessGame(object):
         if board is None:
             self._board = Board(board=EMPTY_BOARD)
 
+    def get_turn(self):
+        return self._turn
+
     def get_board(self):
         return self._board
 
@@ -252,7 +368,12 @@ class ChessGame(object):
             return 
         
         # TODO change to keep track of all past states
-        self._board = self._board.move(from_position, to_position)
+
+        castling, *args = self._board.is_castling(from_position, to_position)
+        if castling:
+            self._board = self._board.castle(*args)
+        else:
+            self._board = self._board.move(from_position, to_position)
         self.toggle_turn()
 
 
@@ -265,6 +386,17 @@ class King(Piece):
     def __init__(self, side):
         super().__init__(move_deltas=self._DELTAS, side=side, jumps=True)
 
+    def possible_moves(self, position, board):
+        result = super().possible_moves(position, board)
+        
+        if board.can_castle(self._side, long=True):
+            result.append(Board.add_position(position, (-2, 0)))
+
+        if board.can_castle(self._side, long=False):
+            result.append(Board.add_position(position, (2, 0)))
+        
+        return result
+
     def __str__(self):
         return f'K:{self._side}'
     
@@ -276,7 +408,38 @@ class Knight(Piece):
         super().__init__(move_deltas=self._DELTAS, side=side, jumps=True)
 
     def __str__(self):
-        return f'k:{self._side}'
+        return f'N:{self._side}'
+
+class Queen(Piece):
+
+    _DELTAS = [(1, 1), (1, 0), (1, -1), (0, 1), (0, -1), (-1, 1), (-1, 0), (-1, -1)]
+    
+    def __init__(self, side):
+        super().__init__(move_deltas=self._DELTAS, side=side, jumps=False)
+
+    def __str__(self):
+        return f'Q:{self._side}'
+
+
+class Rook(Piece):
+
+    _DELTAS = [(1, 0), (0, 1), (0, -1), (-1, 0)]
+    
+    def __init__(self, side):
+        super().__init__(move_deltas=self._DELTAS, side=side, jumps=False)
+
+    def __str__(self):
+        return f'R:{self._side}'
+
+class Bishop(Piece):
+
+    _DELTAS = [(1, 1), (1, -1), (-1, 1), (-1, -1)]
+    
+    def __init__(self, side):
+        super().__init__(move_deltas=self._DELTAS, side=side, jumps=False)
+
+    def __str__(self):
+        return f'B:{self._side}'
 
 
 class Pawn(Piece):
@@ -286,15 +449,51 @@ class Pawn(Piece):
         super().__init__(move_deltas=self._DELTAS, side=side, jumps=True)
 
     def get_deltas(self, position):
-        result = self._deltas
+        result = self._deltas[:]
         # add extra move at start
         if self._side == WHITE and position[1] == 1:
             result.append((0, 2))
         if self._side == BLACK and position[1] == 6:
             result.append((0, 2))
+
+        result.extend([(1, 1), (-1, 1)])
         
         if self._side == BLACK:
             result = [(x, -y) for (x, y) in result]
+
+        return result
+
+    def possible_moves(self, position, board):
+        result = []
+        deltas = self.get_deltas(position)
+        #TODO REMOVE print('deltas:', deltas)
+        for delta in deltas:
+            next_position = Board.add_position(position, delta)
+            if not Board.is_valid_position(next_position):
+                continue
+
+            piece = board.get_piece(next_position)
+
+            # if diagonal make sure enemy piece there
+            if next_position[0] != position[0]:
+                if piece is None:
+                    continue
+                if piece.get_side() != self._side:
+                    result.append(next_position)
+
+            if piece is not None:
+                continue
+            
+            # if double jump make sure no piece in the way
+            if abs(delta[1]) == 2:
+                partial_delta = delta[0], round(delta[1] / 2)
+                middle_position = Board.add_position(position, partial_delta)
+                if board.get_piece(middle_position) is not None:
+                    continue
+
+            
+            result.append(next_position)
+           
         return result
 
     def __str__(self):
